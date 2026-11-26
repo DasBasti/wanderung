@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wanderung</title>
+<!--
+  Standalone walking pad control via Web Bluetooth - no server needed.
+  Open this file in Chromium. On Linux enable
+  chrome://flags/#enable-experimental-web-platform-features (or start Chromium
+  with --enable-features=WebBluetooth). The pad allows one connection only, so
+  close any other app that is connected to it first.
+
+  Protocol (from the Artiwares app, "VERSION1"):
+    service e54eaa50-...-edae; aa55 write 0x88 after connect; aa56 notify
+    12-byte frames, each byte decoded as ((((b-37)^2)-38)&255); aa57 write
+    7-byte commands [cmd,p1,p2,0,0,c1,c2], c1=((cmd+p1)^p2)+37, c2=(p1^cmd)+p2+2.
+-->
+<style>
+  :root {
+    --bg: #f4f2ee; --card: #ffffff; --ink: #1d1c1a; --muted: #6f6a62; --line: #e4e0d8;
+    --accent: #2f7d5b; --accent-ink: #ffffff; --accent-soft: #e3f0e9;
+    --stop: #c2412d; --stop-ink: #ffffff; --bar: #2f7d5b; --bar-dim: #cfe3d8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141513; --card: #1e201d; --ink: #ecebe6; --muted: #9b998f; --line: #2e312c;
+      --accent: #4fb488; --accent-ink: #0d1a13; --accent-soft: #20342a;
+      --stop: #e06a53; --stop-ink: #1a0d0a; --bar: #4fb488; --bar-dim: #2a3d33;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+  .hdr-r { display: flex; align-items: center; gap: 10px; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted);
+          background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .pill.ok .dot { background: var(--accent); }
+  .pill.bad .dot { background: var(--stop); }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
+  .span2 { grid-column: 1 / -1; }
+  .notice { border-color: var(--stop); }
+  .notice p { margin: 0 0 8px; }
+  .notice code { background: var(--bg); padding: 2px 6px; border-radius: 6px; font-size: 14px; user-select: all; overflow-wrap: anywhere; }
+
+  .speed { display: flex; align-items: baseline; gap: 8px; }
+  .speed .v { font-size: 72px; font-weight: 700; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; line-height: 1; }
+  .speed .u { font-size: 18px; color: var(--muted); }
+  .state { margin-top: 8px; font-size: 15px; color: var(--muted); min-height: 21px; }
+  .state b { color: var(--ink); font-weight: 600; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 20px;
+           border-top: 1px solid var(--line); padding-top: 16px; }
+  .stat .k { font-size: 13px; color: var(--muted); }
+  .stat .n { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .setspeed { display: flex; align-items: center; gap: 10px; }
+  .setspeed output { font-size: 28px; font-weight: 700; min-width: 4.2ch; text-align: center; font-variant-numeric: tabular-nums; }
+  input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 28px; }
+  .presets { display: grid; grid-template-columns: repeat(auto-fit, minmax(40px, 1fr)); gap: 8px; margin: 14px 0 18px; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+           border-radius: 12px; padding: 10px 14px; cursor: pointer; min-height: 44px; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.round { width: 44px; padding: 0; font-size: 22px; line-height: 1; flex: none; }
+  .presets button { padding: 10px 0; }
+  .presets button.on { background: var(--accent-soft); border-color: var(--accent); }
+  .actions { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; }
+  .actions button { font-weight: 600; font-size: 17px; min-height: 54px; }
+  .go, .connect { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  .halt { background: var(--stop); color: var(--stop-ink); border-color: var(--stop); }
+  .small { min-height: 36px; padding: 6px 12px; font-size: 14px; }
+  .msg { margin-top: 12px; font-size: 14px; color: var(--muted); min-height: 20px; }
+  .msg.err { color: var(--stop); }
+
+  .totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  @media (max-width: 520px) { .totals { grid-template-columns: repeat(2, 1fr); } }
+  .total .k { font-size: 13px; color: var(--muted); }
+  .total .n { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .total .n small { font-size: 15px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+  .total.hero .n { color: var(--accent); }
+
+  .chart { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; align-items: end; height: 150px; margin-top: 22px; }
+  .col { display: flex; flex-direction: column; align-items: center; height: 100%; gap: 6px; min-width: 0; }
+  .track { flex: 1; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 4px; min-height: 0; }
+  .bar { width: 100%; max-width: 44px; background: var(--bar-dim); border-radius: 6px 6px 2px 2px; min-height: 3px; transition: height .4s; }
+  .col.today .bar { background: var(--bar); }
+  .col .lbl { font-size: 12px; color: var(--muted); }
+  .col .val { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+  .col.today .val { color: var(--ink); font-weight: 600; }
+  .tally-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .tally-foot .note { font-size: 12px; color: var(--muted); }
+  .tally-foot .btns { display: flex; gap: 8px; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: 15px; white-space: nowrap; }
+  @media (max-width: 480px) { th, td { font-size: 14px; } .hide-sm { display: none; } }
+  th { font-size: 13px; color: var(--muted); font-weight: 500; }
+  td.r, th.r { text-align: right; }
+  .empty { color: var(--muted); font-size: 15px; padding: 10px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Wanderung</h1>
+    <div class="hdr-r">
+      <span id="conn" class="pill bad"><span class="dot"></span><span id="connText">Not connected</span></span>
+      <button class="connect small" id="connect">Connect</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card span2 notice" id="nobt" hidden>
+      <h2>Web Bluetooth not available</h2>
+      <p>This page talks to the walking pad directly through the browser. Use Chromium or Chrome (Firefox has no Web Bluetooth).</p>
+      <p>On Linux enable <code>chrome://flags/#enable-experimental-web-platform-features</code> and restart the browser,
+         or start it with <code>chromium --enable-features=WebBluetooth</code>.</p>
+    </section>
+
+    <section class="card">
+      <h2>Live</h2>
+      <div class="speed"><span class="v" id="speed">–</span><span class="u">km/h</span></div>
+      <div class="state" id="state">Press Connect and choose “RunnerT”.</div>
+      <div class="stats">
+        <div class="stat"><div class="k">Time</div><div class="n" id="time">–</div></div>
+        <div class="stat"><div class="k">Distance</div><div class="n" id="dist">–</div></div>
+        <div class="stat"><div class="k">Energy</div><div class="n" id="energy">–</div></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Control</h2>
+      <div class="setspeed">
+        <button class="round" id="minus" aria-label="Slower">−</button>
+        <input type="range" id="slider" min="1" max="6" step="0.5" value="3" aria-label="Speed">
+        <button class="round" id="plus" aria-label="Faster">+</button>
+        <output id="setv">3.0</output>
+      </div>
+      <div class="presets" id="presets"></div>
+      <div class="actions">
+        <button class="go" id="start" disabled>Start</button>
+        <button id="pause" disabled>Pause</button>
+        <button class="halt" id="stop" disabled>Stop</button>
+      </div>
+      <div class="msg" id="msg">&nbsp;</div>
+    </section>
+
+    <section class="card span2">
+      <h2>Distance tally</h2>
+      <div class="totals">
+        <div class="total hero"><div class="k">Today</div><div class="n" id="tToday">–</div></div>
+        <div class="total"><div class="k">This week</div><div class="n" id="tWeek">–</div></div>
+        <div class="total"><div class="k">This month</div><div class="n" id="tMonth">–</div></div>
+        <div class="total"><div class="k">All time</div><div class="n" id="tTotal">–</div></div>
+      </div>
+      <div class="chart" id="chart"></div>
+      <div class="tally-foot">
+        <span class="note">Last 7 days, km · saved in this browser · counts while this page is connected</span>
+        <span class="btns">
+          <button class="small" id="export">Export</button>
+          <button class="small" id="import">Import</button>
+          <input type="file" id="importFile" accept="application/json,.json" hidden>
+        </span>
+      </div>
+    </section>
+
+    <section class="card span2">
+      <h2>Recent sessions</h2>
+      <div id="sessions"><div class="empty">No finished sessions yet.</div></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+// ---------- protocol ----------
+const U = n => `e54eaa${n}-371b-476c-99a3-74d267e3edae`;
+const SVC = U("50"), CH_HANDSHAKE = U("55"), CH_NOTIFY = U("56"), CH_CMD = U("57");
+const CMD = { start: 1, stop: 2, speed: 3, slope: 4, pause: 5, lube: 7, info: 8 };
+const STATUS = { 0: "Idle", 1: "Error", 4: "Running", 6: "Slowing down", 7: "Fault", 8: "Stopping",
+                 10: "Standby", 65: "Safety key removed" };
+const START_DELAY = 4000;
+
+const decode = bytes => Uint8Array.from(bytes, b => ((((b - 37) ^ 2) - 38) & 255));
+function command(cmd, p1 = 0, p2 = 0) {
+  const c1 = ((((cmd + p1) & 255) ^ p2) + 37) & 255;
+  const c2 = (((p1 ^ cmd) + p2 + 2)) & 255;
+  return Uint8Array.of(cmd & 255, p1 & 255, p2 & 255, 0, 0, c1, c2);
+}
+function parseRun(d) {
+  return { status: d[0], speed: d[1] / 10, duration: (d[2] << 8) | d[3], distance: (d[4] << 8) | d[5],
+           energy: (d[6] << 8) | d[7], heartRate: d[8], slope: d[9], targetSpeed: d[10] / 10 };
+}
+function parseInfo(d) {
+  return { minSpeed: d[6] / 10, maxSpeed: (d[7] > 10 ? d[7] : 120) / 10, metric: !(d[8] & 1) };
+}
+
+// ---------- tally (same rules as tally.py) ----------
+const TALLY_KEY = "wanderung.tally.v1";
+const isoDay = (t = new Date()) => `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+const Tally = {
+  total: 0, days: {}, sessions: [], last_distance: 0, last_duration: 0, session_start: null, first: true,
+  load() {
+    try {
+      const d = JSON.parse(localStorage.getItem(TALLY_KEY) || "null");
+      if (d) Object.assign(this, { total: d.total || 0, days: d.days || {}, sessions: d.sessions || [],
+        last_distance: d.last_distance || 0, last_duration: d.last_duration || 0, session_start: d.session_start ?? null });
+    } catch (e) { console.warn("tally load failed", e); }
+  },
+  data() {
+    return { total: this.total, days: this.days, sessions: this.sessions, last_distance: this.last_distance,
+             last_duration: this.last_duration, session_start: this.session_start };
+  },
+  save() {
+    try { localStorage.setItem(TALLY_KEY, JSON.stringify(this.data())); }
+    catch (e) { say("Could not save tally in browser storage — use Export to keep it", true); }
+  },
+  finish() {
+    if (this.session_start != null && this.last_distance > 0) {
+      this.sessions.push({ start: this.session_start, distance: this.last_distance, duration: this.last_duration });
+      this.sessions = this.sessions.slice(-200);
+    }
+    this.session_start = null; this.last_duration = 0;
+  },
+  update(distance, duration) {
+    let changed = false;
+    if (this.first) {
+      this.first = false;
+      if (!(distance >= this.last_distance && duration >= this.last_duration)) { this.finish(); this.last_distance = 0; changed = true; }
+    }
+    if (distance < this.last_distance || (duration < this.last_duration && distance === 0)) {
+      this.finish(); this.last_distance = 0; changed = true;
+    }
+    if (distance > 0 && this.session_start == null) { this.session_start = Date.now() / 1000 - duration; changed = true; }
+    const delta = distance - this.last_distance;
+    if (delta > 0) {
+      this.total += delta;
+      const k = isoDay(); this.days[k] = (this.days[k] || 0) + delta;
+      this.last_distance = distance; changed = true;
+    }
+    this.last_duration = duration;
+    if (changed) this.save();
+    return changed;
+  },
+  summary() {
+    const now = new Date(), today = isoDay(now);
+    const last7 = [...Array(7)].map((_, i) => { const d = new Date(now); d.setDate(d.getDate() - (6 - i)); return isoDay(d); });
+    const ws = new Date(now); ws.setDate(ws.getDate() - ((now.getDay() + 6) % 7)); const weekStart = isoDay(ws);
+    const sum = f => Object.entries(this.days).filter(([d]) => f(d)).reduce((a, [, m]) => a + m, 0);
+    return { total: this.total, today: this.days[today] || 0, week: sum(d => d >= weekStart),
+             month: sum(d => d.startsWith(today.slice(0, 7))),
+             last7: last7.map(d => ({ date: d, distance: this.days[d] || 0 })),
+             sessions: this.sessions.slice(-20).reverse() };
+  },
+};
+
+// ---------- bluetooth ----------
+const pad = { device: null, cmdChar: null, info: null, data: null, ready: false, queue: Promise.resolve(), manualDisconnect: false };
+
+function gatt(fn) {                       // GATT ops must not overlap
+  const p = pad.queue.then(fn);
+  pad.queue = p.catch(() => {});
+  return p;
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function send(cmd, p1 = 0, p2 = 0) {
+  if (!pad.ready) throw new Error("not connected");
+  return gatt(() => pad.cmdChar.writeValueWithResponse(command(cmd, p1, p2)));
+}
+
+function onNotify(ev) {
+  const d = decode(new Uint8Array(ev.target.value.buffer));
+  if (d.length < 12) return;
+  if (d[11] === 0) {
+    pad.data = parseRun(d);
+    if (Tally.update(pad.data.distance, pad.data.duration)) renderTally();
+    renderLive();
+  } else if (d[11] === CMD.info) {
+    pad.info = parseInfo(d);
+    range = [pad.info.minSpeed, pad.info.maxSpeed];
+    $("slider").min = range[0]; $("slider").max = range[1];
+    buildPresets();
+  }
+}
+
+async function setup() {
+  setConn("Connecting…");
+  const server = await pad.device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  const notify = await svc.getCharacteristic(CH_NOTIFY);
+  const hs = await svc.getCharacteristic(CH_HANDSHAKE);
+  pad.cmdChar = await svc.getCharacteristic(CH_CMD);
+  notify.removeEventListener("characteristicvaluechanged", onNotify);
+  notify.addEventListener("characteristicvaluechanged", onNotify);
+  await notify.startNotifications();
+  await hs.writeValueWithResponse(Uint8Array.of(0x88));   // keeps the pad from dropping us
+  await sleep(1500);                                      // commands right after the handshake are ignored
+  pad.ready = true;
+  Tally.first = true;
+  setConn();
+  for (let i = 0; i < 3 && !pad.info; i++) { await send(CMD.info); await sleep(1200); }
+}
+
+async function connect() {
+  if (!navigator.bluetooth) return;
+  try {
+    pad.device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SVC] }, { namePrefix: "RunnerT" }], optionalServices: [SVC] });
+  } catch (e) {
+    if (e.name !== "NotFoundError") say(e.message, true);   // NotFoundError = chooser cancelled
+    return;
+  }
+  pad.device.addEventListener("gattserverdisconnected", onDisconnected);
+  pad.manualDisconnect = false;
+  try { await setup(); say(""); }
+  catch (e) { pad.ready = false; setConn(); say(connectError(e), true); }
+}
+
+function connectError(e) {
+  return /in use|busy|failed for unknown reason|Connection attempt failed/i.test(e.message)
+    ? `${e.message} — is another app connected to the pad?` : e.message;
+}
+
+async function onDisconnected() {
+  pad.ready = false; setConn();
+  if (pad.manualDisconnect) return;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    say(`Connection lost — reconnecting (${attempt}/5)…`);
+    await sleep(2000 * attempt);
+    try { await setup(); say("Reconnected"); return; } catch (e) { console.warn(e); }
+  }
+  say("Connection lost. Press Connect to try again.", true);
+}
+
+function disconnect() {
+  pad.manualDisconnect = true;
+  if (pad.device && pad.device.gatt.connected) pad.device.gatt.disconnect();
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+let range = [1, 6], speedTimer = null, pendingStart = null;
+
+function fmtTime(s) {
+  s = s || 0;
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, ss = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(ss).padStart(2, "0");
+}
+const km = m => m < 1000 ? `${m}<small>m</small>` : `${(m / 1000).toFixed(m < 100000 ? 2 : 1)}<small>km</small>`;
+const kmText = m => m < 1000 ? `${m} m` : `${(m / 1000).toFixed(2)} km`;
+
+function say(text, isErr) {
+  $("msg").textContent = text || " ";
+  $("msg").className = "msg" + (isErr ? " err" : "");
+}
+function setConn(text) {
+  const ok = pad.ready;
+  $("conn").className = "pill " + (ok ? "ok" : text ? "" : "bad");
+  $("connText").textContent = text || (ok ? "Connected" : "Not connected");
+  $("connect").textContent = ok ? "Disconnect" : "Connect";
+  ["start", "pause", "stop"].forEach(id => $(id).disabled = !ok);
+  if (!ok && !text) $("state").textContent = pad.device ? "Disconnected" : "Press Connect and choose “RunnerT”.";
+}
+
+const running = () => pad.data && pad.data.status === 4;
+const selected = () => parseFloat($("slider").value);
+function setSelected(v, sendIt) {
+  v = Math.min(range[1], Math.max(range[0], Math.round(v * 2) / 2));
+  $("slider").value = v;
+  $("setv").textContent = v.toFixed(1);
+  document.querySelectorAll("#presets button").forEach(b => b.classList.toggle("on", +b.dataset.v === v));
+  if (sendIt && running()) {
+    clearTimeout(speedTimer);
+    speedTimer = setTimeout(() => act("speed", v), 250);
+  }
+}
+async function act(action, speed) {
+  try {
+    if (action !== "start") { clearTimeout(pendingStart); pendingStart = null; }
+    if (action === "start") {
+      await send(CMD.start);
+      clearTimeout(pendingStart);
+      pendingStart = setTimeout(() => { pendingStart = null; send(CMD.speed, Math.round(speed * 10)).catch(e => say(e.message, true)); }, START_DELAY);
+      say(`Starting… belt goes to ${speed.toFixed(1)} km/h after the countdown`);
+    } else if (action === "speed") {
+      await send(CMD.speed, Math.round(speed * 10)); say(`Speed set to ${speed.toFixed(1)} km/h`);
+    } else if (action === "pause") { await send(CMD.pause); say("Paused"); }
+    else if (action === "stop") { await send(CMD.stop); say("Stopping"); }
+  } catch (e) { say(e.message, true); }
+}
+
+function renderLive() {
+  const s = pad.data; if (!s) return;
+  $("speed").textContent = s.speed.toFixed(1);
+  $("state").innerHTML = `<b>${STATUS[s.status] || "Status " + s.status}</b>` +
+    (running() && s.targetSpeed ? ` · target ${s.targetSpeed.toFixed(1)} km/h` : "");
+  $("time").textContent = fmtTime(s.duration);
+  $("dist").textContent = kmText(s.distance);
+  $("energy").textContent = s.energy;
+  $("start").textContent = running() ? "Set speed" : "Start";
+}
+
+function renderTally() {
+  const t = Tally.summary();
+  $("tToday").innerHTML = km(t.today); $("tWeek").innerHTML = km(t.week);
+  $("tMonth").innerHTML = km(t.month); $("tTotal").innerHTML = km(t.total);
+  const max = Math.max(1, ...t.last7.map(d => d.distance));
+  const todayIso = t.last7[6].date;
+  $("chart").innerHTML = t.last7.map(d => {
+    const day = new Date(d.date + "T12:00").toLocaleDateString(undefined, { weekday: "short" });
+    return `<div class="col${d.date === todayIso ? " today" : ""}" title="${d.date}: ${kmText(d.distance)}">
+      <div class="track"><div class="val">${d.distance ? (d.distance / 1000).toFixed(1) : ""}</div>
+      <div class="bar" style="height:${Math.round(d.distance / max * 100)}%"></div></div><div class="lbl">${day}</div></div>`;
+  }).join("");
+  $("sessions").innerHTML = !t.sessions.length ? `<div class="empty">No finished sessions yet.</div>` :
+    `<table><thead><tr><th>Started</th><th class="r">Distance</th><th class="r">Time</th><th class="r hide-sm">Avg</th></tr></thead><tbody>` +
+    t.sessions.map(s => {
+      const when = new Date(s.start * 1000).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "numeric", hour: "2-digit", minute: "2-digit" });
+      const avg = s.duration ? (s.distance / s.duration * 3.6).toFixed(1) + " km/h" : "–";
+      return `<tr><td>${when}</td><td class="r">${kmText(s.distance)}</td><td class="r">${fmtTime(s.duration)}</td><td class="r hide-sm">${avg}</td></tr>`;
+    }).join("") + "</tbody></table>";
+}
+
+function buildPresets() {
+  const vals = [];
+  for (let v = Math.ceil(range[0]); v <= range[1]; v++) vals.push(v);
+  $("presets").innerHTML = vals.map(v => `<button data-v="${v}">${v}</button>`).join("");
+  document.querySelectorAll("#presets button").forEach(b => b.onclick = () => setSelected(+b.dataset.v, true));
+  setSelected(selected(), false);
+}
+
+function exportTally() {
+  const blob = new Blob([JSON.stringify(Tally.data(), null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = `wanderung-tally-${isoDay()}.json`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function importTally(file) {
+  try {
+    const d = JSON.parse(await file.text());
+    if (typeof d.total !== "number" || typeof d.days !== "object") throw new Error("not a tally file");
+    Object.assign(Tally, { total: d.total, days: d.days, sessions: d.sessions || [],
+      last_distance: d.last_distance || 0, last_duration: d.last_duration || 0, session_start: d.session_start ?? null, first: true });
+    Tally.save(); renderTally(); say(`Imported tally: ${kmText(d.total)} total`);
+  } catch (e) { say("Import failed: " + e.message, true); }
+}
+
+$("connect").onclick = () => pad.ready ? disconnect() : connect();
+$("slider").oninput = () => setSelected(selected(), false);
+$("slider").onchange = () => setSelected(selected(), true);
+$("minus").onclick = () => setSelected(selected() - 0.5, true);
+$("plus").onclick = () => setSelected(selected() + 0.5, true);
+$("start").onclick = () => running() ? act("speed", selected()) : act("start", selected());
+$("pause").onclick = () => act("pause");
+$("stop").onclick = () => act("stop");
+$("export").onclick = exportTally;
+$("import").onclick = () => $("importFile").click();
+$("importFile").onchange = e => { if (e.target.files[0]) importTally(e.target.files[0]); e.target.value = ""; };
+
+if (!navigator.bluetooth) { $("nobt").hidden = false; $("connect").disabled = true; }
+Tally.load();
+buildPresets();
+renderTally();
+setConn();
+</script>
+</body>
+</html>
